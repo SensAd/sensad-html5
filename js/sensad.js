@@ -1,17 +1,20 @@
 // Copyright 2017, SensAd
 
-var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
+var SensAd = function (apiKey, consumerEmail, videoId, videoZIndex) {
 
-  if (!overlayId || !videoId) {
-    return;
+  if (!videoId) {
+    return undefined;
   }
 
-  var videoTag = document.getElementById(videoId);
-  var overlayTag = document.getElementById(overlayId);
+  var videoElement = document.getElementById(videoId);
+  var videoContainerElement = videoElement.parentElement;
 
-  if (!overlayTag || !videoTag) {
-    return;
+  if (!videoElement || !videoContainerElement) {
+    return undefined;
   }
+
+  var inMillis = 500;
+  var outMillis = 400;
 
   var K4W = 3840;  /* UHD 4K width */
   var K4H = 2160;  /* UHD 4K height */
@@ -19,12 +22,37 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
   var stopped = false;
   var timeoutRefs = [];
   var vmap;
+  var currentAd;
+  var currentXd;
 
   var _address = arguments[4];
-  var _debug = arguments[5];
+  var _slowAnimations = arguments[5] ? 10 : 1;
+  var _debug = arguments[6];
+  var _customHandler = arguments[7];
+
+  var unPad = function (string) {
+    return parseInt(Number(string));
+  };
+
+  var stringToTimeCode = function (string) {
+    var split = string.split ? string.split(":") : [];
+    if (3 !== split.length) {
+      return undefined;
+    }
+    var timeCode = 0;
+    var secs = [3600, 60, 1];
+    for (var i = 0; i < split.length; i++) {
+      var number = unPad(split[i]);
+      if (!Number.isFinite(number)) {
+        return undefined;
+      }
+      timeCode += number * secs[i];
+    }
+    return timeCode;
+  };
 
   var get = function (url, cb) {
-    if(0 != url.indexOf("http")) {
+    if (0 != url.indexOf("http")) {
       url = (_address || "https://ad.sensad.net") + url;
     }
     var xhr = new XMLHttpRequest();
@@ -66,20 +94,22 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
         if (type && type.length) {
           ad.type = type;
           switch (ad.type) {
-            case "thin": ad.thin = true; break;
-            case "fat": ad.fat = true; break;
-            case "custom": ad.custom = true; break;
+            case "tall": ad.tall = true; break;
+            case "expander": ad.expander = true; break;
+            case "singledecorator": ad.singledecorator = true; break;
+            case "doubledecorator": ad.doubledecorator = true; break;
+            case "free": ad.free = true; break;
           }
         }
         var side = nlNode.getAttribute("r:side");
         if (side && side.length) {
           ad.side = side;
           switch (ad.side) {
-            case "left": ad.left = true; break;
-            case "right": ad.right = true; break;
+            case "lefty": ad.left = true; break;
+            case "righty": ad.right = true; break;
           }
         }
-        if (ad.custom) {
+        if (ad.free) {
           var left = Number(nlNode.getAttribute("r:left"));
           var top = Number(nlNode.getAttribute("r:top"));
           if (isNaN(left) || isNaN(top)) {
@@ -218,11 +248,11 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
   var handleClick = function (ad) {
     var toWeb = function () {
       if (ad.webUrl && ad.webUrl.length) {
-        window.open(ad.webUrl + (-1 < ad.webUrl.indexOf("?") ? "&fb=1" : "?fb=1"));
+        window.open(ad.webUrl);
       }
     }
     if (ad.pushUrl && ad.pushUrl.length) {
-      get(ad.pushUrl, function(r, code) {
+      get(ad.pushUrl, function (r, code) {
         if (404 === code) {
           toWeb();
         }
@@ -232,20 +262,16 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
     }
   };
 
-  var rationale = function(size) {
-    size = Number(size);
-    if (isNaN(size)) {
-      return;
-    }
-    var width = videoTag.offsetWidth;
-    if (width <= 0) {
-      return;
-    }
-    return (width / K4W) * size;
+  var rationaleW = function (size) {
+    return (Number(size) / K4W) * 100;
   };
 
-  var customIsLefty = function (ad) {
-    if (!ad.custom) {
+  var rationaleH = function (size) {
+    return (Number(size) / K4H) * 100;
+  };
+
+  var freeIsLefty = function (ad) {
+    if (!ad.free) {
       return undefined;
     }
     if (ad.left + (ad.width / 2) < (K4W / 2)) {
@@ -254,114 +280,153 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
     return false;
   };
 
-  var Style = function (ad) {
-    var stack = ["background-image:url('" + ad.imgUrl + "')",
-      "background-size:cover",
-    "background-position:" + (ad.left ? "left" : "right"),
-      "position:absolute"];
+  var Style = function (ad, node) {
+    var stack;
+    if (node === videoElement) {
+      stack = [];
+    } else {
+      stack = ["position:absolute", "background-image:url('" + ad.imgUrl + "')", "background-position:" + (ad.left ? "left" : "right"), "background-repeat:no-repeat"];
+      if (ad.expander) {
+        stack.push("background-size:auto 100%");
+        stack.push("background-clip:content-box");
+        stack.push("padding-right:60px");
+      } else {
+        stack.push("background-size:cover");
+      }
+    }
     this.style = function () {
       var result = stack.join(";") + ";";
-      if (_debug) {
-        console.log(JSON.stringify(stack));
-      }
       return result;
     }
-    this.initialSize = function () {
-      stack.push("width:" + rationale(ad.expandedWidth || ad.width) + "px");
-      stack.push("height:" + rationale(ad.expandedHeight || ad.height) + "px");
+    this.zIndex = function () {
+      if (videoZIndex) {
+        if (ad.singledecorator || ad.doubledecorator) {
+          stack.push(`z-index:${videoZIndex - 1}`);
+        } else {
+          stack.push(`z-index:${videoZIndex + 1}`);
+        }
+      }
+      return this;
+    };
+    this.outOrigin = function () {
+      if (ad.free) {
+        stack.push(freeIsLefty(ad) ? (`left:-${rationaleW(ad.width)}%`) : (`right:-${rationaleW(ad.width)}%`));
+        stack.push(`bottom:${rationaleH(K4H - ad.top - ad.height)}%`);
+      } else if (ad.singledecorator || ad.doubledecorator) {
+        stack.push(ad.left ? "right:0%" : "left:0%");
+        stack.push("top:0%");
+      } else {
+        if (ad.expander) {
+          stack.push(ad.left ? (`left:calc(-${rationaleW(ad.expandedWidth || ad.width)}% - 60px)`) : (`right:calc(-${rationaleW(ad.expandedWidth || ad.width)}% - 60px)`));
+          stack.push("bottom:5%");
+        } else {
+          stack.push(ad.left ? (`left:-${rationaleW(ad.expandedWidth || ad.width)}%`) : (`right:-${rationaleW(ad.expandedWidth || ad.width)}%`));
+          stack.push("bottom:0");
+        }
+      }
+      return this;
+    };
+    this.inOrigin = function () {
+      if (ad.free) {
+        stack.push(freeIsLefty(ad) ? (`left:${rationaleW(ad.left)}%`) : (`right:${rationaleW(K4W - ad.left - ad.width)}%`));
+        stack.push(`bottom:${rationaleH(K4H - ad.top - ad.height)}%`);
+      } else if (ad.singledecorator || ad.doubledecorator) {
+        stack.push(ad.left ? "right:0%" : "left:0%");
+        stack.push("top:0%");
+      } else {
+        stack.push(ad.left ? "left:0%" : "right:0%");
+        if (ad.expander) {
+          stack.push("bottom:5%");
+        } else {
+          stack.push("bottom:0");
+        }
+      }
+      return this;
+    };
+    this.collapsedOutOrigin = function () {
+      if (ad.singledecorator || ad.doubledecorator) {
+        stack.push(ad.left ? "right:0%" : "left:0%");
+        stack.push("top:0%");
+      } else {
+        if (ad.expander) {
+          stack.push(ad.left ? (`left:calc(-${rationaleW(ad.width)}% - 60px)`) : (`right:calc(-${rationaleW(ad.width)}% - 60px)`));
+          stack.push("bottom:5%");
+        } else {
+          stack.push(ad.left ? (`left:-${rationaleW(ad.width)}%`) : (`right:-${rationaleW(ad.width)}%`));
+          stack.push("bottom:0");
+        }
+      }
+      return this;
+    };
+    this.outSize = function () {
+      if (ad.expander) {
+        stack.push(`width:calc(${rationaleW(ad.expandedWidth)}% + 60px)`);
+      } else {
+        stack.push(`width:${rationaleW(ad.expandedWidth || ad.width)}%`);
+      }
+      stack.push(`height:${rationaleH(ad.expandedHeight || ad.height)}%`);
+      return this;
+    };
+    this.inSize = function () {
+      if (ad.singledecorator) {
+        stack.push(`width:80%`);
+        stack.push(`height:80%`);
+      } else if (ad.doubledecorator) {
+        stack.push(`width:60%`);
+        stack.push(`height:60%`);
+      } else {
+        if (ad.expander) {
+          stack.push(`width:calc(${rationaleW(ad.expandedWidth)}% + 60px)`);
+        } else {
+          stack.push(`width:${rationaleW(ad.width)}%`);
+        };
+        
+        stack.push(`height:${rationaleH(ad.expandedHeight || ad.height)}%`);
+      }
       return this;
     };
     this.collapsedSize = function () {
-      stack.push("width:" + rationale(ad.width) + "px");
-      stack.push("height:" + rationale(ad.height) + "px");
-      return this;
-    };
-    this.initialOrigin = function () {
-      if (ad.custom) {
-        stack.push(customIsLefty(ad) ? ("left:-" + rationale(ad.width) + "px") : ("right:-" + rationale(ad.width) + "px"));
-        stack.push("bottom:" + rationale(K4H - ad.top - ad.height) + "px");
-        //stack.push("bottom:-" + rationale(ad.height) + "px");
-        //stack.push("transform: scale(0.2)");
+      if (ad.expander) {
+        stack.push(`width:calc(${rationaleW(ad.width)}% + 60px)`);
       } else {
-        stack.push(ad.left ? ("left:-" + rationale(ad.width) + "px") : ("right:-" + rationale(ad.width) + "px"));
-        stack.push("bottom:0");
+        stack.push(`width:${rationaleW(ad.width)}%`);
       }
+      stack.push(`height:${rationaleH(ad.height)}%`);
       return this;
     };
-    this.finalOrigin = function () {
-      if (ad.custom) {
-        stack.push(customIsLefty(ad) ? ("left:" + rationale(ad.left) + "px") : ("right:" + rationale(K4W - ad.left - ad.width) + "px"));
-        stack.push("bottom:" + rationale(K4H - ad.top - ad.height) + "px");
-        //stack.push("transform: scale(1.0)");
-      } else {
-        stack.push(ad.left ? "left:0" : "right:0");
-        stack.push("bottom:0");
-      }
-      return this;
-    };
-    this.translateIn = function (cb) {
+    this.animateIn = function (cb) {
       stack.push("transition-property:all",
-        "transition-duration:0.3s",
+        `transition-duration:${(inMillis / 1000) * _slowAnimations}s`,
         "transition-timing-function:ease-out");
-      timeoutRefs.push(setTimeout(cb, 300));
+      timeoutRefs.push(setTimeout(cb, inMillis * _slowAnimations));
       return this;
     };
-    this.translateOut = function (cb) {
+    this.animateOut = function (cb) {
       stack.push("transition-property:all",
-        "transition-duration:0.2s",
+        `transition-duration:${(outMillis / 1000) * _slowAnimations}s`,
         "transition-timing-function:ease-out");
-      timeoutRefs.push(setTimeout(cb, 200));
+      timeoutRefs.push(setTimeout(cb, outMillis * _slowAnimations));
       return this;
     };
     return this;
   };
 
   var putIntoPosition = function (ad, xd) {
-    var style = new Style(ad);
-    xd.setAttribute("style", style.initialSize().initialOrigin().style());
-    if (_debug) {
-      console.log("IN position");
-    }  
-    slideIn(ad, xd, function () {
-
-    });
+    xd.setAttribute("style", new Style(ad, xd).zIndex().outOrigin().outSize().style());
+    setTimeout(function () {
+      slideIn(ad, xd);
+    }, 100);
   };
 
-  var slideIn = function (ad, xd, cb) {
-    if (_debug) {
-      console.log("sliding IN");
-    }  
-    var style = new Style(ad);
-    xd.setAttribute("style", style.initialSize().finalOrigin().translateIn(function () {
-      ad.appeared = Date.now();
-      if (_debug) {
-        console.log("slid IN");
-      }  
-      if (ad.thin) {
-        var remainingToCollapse = Math.min(ad.minDuration, 5000);
-        if (_debug) {
-          console.log("will collapse in " + (remainingToCollapse / 1000) + "s");
-        }  
-        ad.timeoutRef = setTimeout(function () {
-          collapse(ad, xd, 0, function() {
-            var elapsed = Date.now() - ad.appeared;
-            var remainingDuration = ad.minDuration - elapsed;
-            if (_debug) {
-              console.log("will slide OUT in " + (remainingDuration / 1000) + "s");
-            }  
-            ad.timeoutRef = setTimeout(function () {
-              slideOut(ad, xd);
-            }, remainingDuration);
-            timeoutRefs.push(ad.timeoutRef);
-          });
-        }, remainingToCollapse);
-        timeoutRefs.push(ad.timeoutRef);
+  var slideIn = function (ad, xd) {
+    var node = (ad.singledecorator || ad.doubledecorator) ? videoElement : xd;
+
+    node.setAttribute("style", new Style(ad, node).zIndex().inOrigin().inSize().animateIn(function () {
+      if (ad.expander) {
+        scheduleCollapse(ad, xd);
       } else {
-        if (_debug) {
-          console.log("will slide OUT in " + (ad.minDuration / 1000) + "s");
-        }  
         ad.timeoutRef = setTimeout(function () {
-          slideOut(ad, xd);
+          slideOut(ad, node);
         }, ad.minDuration);
         timeoutRefs.push(ad.timeoutRef);
         // TODO: test 0 duration
@@ -369,72 +434,116 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
     }).style());
   };
 
-  var slideOut = function (ad, xd) {
-    if (_debug) {
-      console.log("sliding OUT");
-    }  
-    var onCollapsed = function () {
-      var style = new Style(ad);
-      xd.setAttribute("style", style.collapsedSize().initialOrigin().translateOut(function () {
-        if (_debug) {
-          console.log("slid OUT");
-        }  
-        xd.remove();
-      }).style());
+  var slideOut = function (ad, node, cb) {
+
+    disposeTimeoutRefs();
+    if (ad.timeoutRef) {
+      delete ad.timeoutRef;
     }
-    if (ad.thin) {
-      collapse(ad, xd, 0, function () {
-        onCollapsed();
-      });
+
+    var style = new Style(ad, node).zIndex();
+    if (ad.expander && ad.collapsed) {
+      style.collapsedOutOrigin().collapsedSize();
     } else {
-      onCollapsed();
+      style.outOrigin().outSize();
     }
+    node.setAttribute("style", style.animateOut(function () {
+      ad.xd.remove();
+      currentXd = undefined;
+      currentAd = undefined;
+      if (cb) {
+        cb();
+      }
+    }).style());
+  };
+
+  var scheduleCollapse = function (ad, xd) {
+    if (ad.timeoutRef) {
+      clearTimeout(ad.timeoutRef);
+      delete ad.timeoutRef;
+    }
+    ad.timeoutRef = setTimeout(function () {
+      collapse(ad, xd, 0);
+    }, 5000);
+    timeoutRefs.push(ad.timeoutRef);
+  };
+
+  var scheduleSlideOut = function (ad, xd) {
+    if (ad.timeoutRef) {
+      clearTimeout(ad.timeoutRef);
+      delete ad.timeoutRef;
+    }
+    var millisToSlideOut = Math.max(ad.minDuration - 5000, 5000);
+    if (millisToSlideOut < 1) {
+      // never auto-animate out, only on close;
+      //return;
+    }
+    ad.timeoutRef = setTimeout(function () {
+      slideOut(ad, xd);
+    }, millisToSlideOut);
+    timeoutRefs.push(ad.timeoutRef);
   };
 
   var collapse = function (ad, xd, manual, cb) {
     if (ad.collapsed) {
-      if (_debug) {
-        console.log("already collapsed");
-      }  
-      return cb();
+      if (cb) {
+        cb();
+      }
     }
-    if (_debug) {
-      console.log("collapsing");
-    }  
-    var style = new Style(ad);
-    xd.setAttribute("style", style.collapsedSize().finalOrigin().translateOut(function () {
-      if (_debug) {
-        console.log("collapsed");
-      }  
+    if (ad.timeoutRef) {
+      clearTimeout(ad.timeoutRef);
+      delete ad.timeoutRef;
+    }
+    xd.setAttribute("style", new Style(ad, xd).zIndex().inOrigin().collapsedSize().animateOut(function () {
       ad.collapsed = true;
-      cb();
+
+      if (ad.expander && !ad.closeHandle) {
+        ad.counter.remove();
+        ad.closeHandle = document.createElement("div");
+        xd.appendChild(ad.closeHandle);
+        ad.closeHandle.setAttribute("style", `position:absolute;top:0;${ad.left ? "right:0" : "left:0"};width:60px;height:50%;background-color:rgba(81, 81, 81, 0.7);background-image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAYAAAAehFoBAAAABGdBTUEAALGPC/xhBQAAAl5JREFUWAnV2T9OwzAUBnDsqiBmBhBQurFUYq04AgdgRGLiXEiMHIAjoG4IqQtbVUAwMCNATdCX6kWuY8fPznMFHkjrP+/7NTRWm25stLTp6HyzZTjLUHLm/PB0+6F/dPW4NTzLInMURRYyke0YrrqUawALPt5fLlRZ7GNc9XqTk6/ZnWuuVB+w5WIxRr1S6ded3YObwfP9p12/AbaxtCAn2sRSng+9AvZhqUgOtAtLeS50DQ5hqYgkug1LeTa6AnOxVEQCzcFSnolW2EZ+niaXdIHRpNCxCzoGSw6g+8fjaz2a3n5rreY0wD3iikYwdz7NS8FiLYyw1u/h1EIxZ1oiowbjVUgURB1Xk6q9AkaQVGETLVmzAZZGS2Jhc4Kl0NLYVnBXNNbTZwM85rbQRew9wxSQcpZKpWaqLIdUg3sMYVEnCMakGHROLBvMRefGRoFD6HVgo8E+9LqwSWAbvU5sMpjQRVHs5doNkOFq2tXJ7UvB4j/Cre+ax9rW7IUx25y51nz7cPZccy09jgZLYOvwhG/jUWBJbCqaDc6BTUGzwDmxseggeB3YGHTrtpaKxQ6gtX4jCPfI+WLrPcNdsHQfTqKG/WKdYMkgyVrAN8DSAQiRrLkCliwMqNmkatdgqYIm0n4skVGBJQrZON/zrlkaNwOLohz4Anz9qR9esINgra+urx9GWKsz/K9ut9Ir4qJTzyzlmEfO28O8N4y19UWHJyG0JBZ5aG1oG4v5K2B0+NA5sMhDc6FdWMxtgNFpo3NikYdmon3Y5UzPX6D/4g+LHu6yO/ln1Naq7YOhzF+NJnMeXvjcogAAAABJRU5ErkJggg==);background-size:auto 30%;background-repeat:no-repeat;background-position:center;`);
+        ad.closeHandle.addEventListener("click", function (e) {
+          if (e.target === this) {
+            disposeCurrentAd();
+          }
+        });
+        ad.toggleHandle = document.createElement("div");
+        xd.appendChild(ad.toggleHandle);
+        ad.toggleHandle.setAttribute("style", `position:absolute;bottom:0;${ad.left ? "right:0" : "left:0"};width:60px;height:50%;background-color:rgba(81, 81, 81, 0.7);background-image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAAAsCAYAAADGiP4LAAAABGdBTUEAALGPC/xhBQAAAxNJREFUaAXd2kFy1DAQBdCYRQqOQFiw5QZZcAAqF8giVKpYcbEUm1yA4gi5AVsWwBFgxdB/6Da2LNndUksjj6qMPR61uvVmPHIKX1xUaIfD4bLCsKtD1sr5bDVrxptU6AsK+0D7m4zwrBDOhZzI7doGz9G4wHsa84rHfRqG4bNnjnAsxrnm8z9o/0A5f4X9cl+7AUVwpKZqSAGO5HNFcgFawZGi3ZESOJLPDakYSIEjRbshbeBIPhekIiADjhRdjKTEkXzFSNmrWAYOir6muHdSvXXPsfKDrAnHYnHPtWr6L/pkAWXiIPkf2r4tqtCfQCzGsLQiJPMlVojzSEvwV8vswr6U/w2du6XN+uFmXW4moFPjCFZLJDVQLzitkVRAveG0RNoE6hWnFdLqD13vOEDiH/1HOsxd3Z4LdmyfBNoDjkyoAOlAY7znucpws330EtsTznQ2VLflFuA7xb6kDV+S5C3AAmivOAKlRJriSGgUaQa0dxyZ6QZSDEdCF0gj0LngyEwTSGs4EjpDOgKdG47MNEDS4EjoiDScK47MlJHe0utXtCVXbek/2R+RLAGT2OM9Bz6RvTQrzjivnEsMN2Q/aUNSHBf/hU5jVGnBJWbJ8f8SkyjlpTbFkdAukTxwMMFxFcOLDaQYDsLQukLywsHEZkA4kUBaw0EYWhdInjiY1AIIJwMkDQ7C0E6K5I2DCUWB8AYj3dEhVjr8IGvbSZBq4GDCyWWe//v2E/VJIibEMOYtF5zo4nu6Fg6qTALhTUL6TbsH2rDsWVozpJo4mLDq20FF4KmJ6UMJWqyql1ttHDUQOvaG1ALHBNQTUiscM1APSC1xsoBOidQaB3NdXcXQIdb4FiB3dXsdG1N5DrHWmsc/PJU5Zt2sycbgTCQ8/vJlHMR4wLFPhrAiHORRLfNrBdHXXnsLUPxskNRBOW/oeOsxmGIc5CsGwiAKJDcc5EPbQHLBQR4XIC449U1yx0E+tASSGw5yuAFxwSFSNRzkQwuQXHH+ZXD+F5cbbR+5cOfR48MhF+fEB9R/o2IvW1dZK+dfOGD+CxzXrK0AAAAASUVORK5CYII=);background-size:auto 30%;background-repeat:no-repeat;background-position:center;`);
+        ad.toggleHandle.addEventListener("click", function (e) {
+          if (e.target === this) {
+            ad.collapsed = ad.collapsed || false;
+            if (ad.collapsed) {
+              expand(ad, xd, 1);
+            } else {
+              collapse(ad, xd, 1);
+            }
+          }
+        });
+      }
+
+      if (cb) {
+        cb();
+      } else {
+        if (!manual) {
+          scheduleSlideOut(ad, xd);
+        }
+      }
     }).style());
   };
 
-  var expand = function (ad, xd, cb) {
+  var expand = function (ad, xd) {
     if (!ad.collapsed) {
-      if (_debug) {
-        console.log("already expanded");
-      }  
-      return cb();
+      return;
     }
-    if (_debug) {
-      console.log("expanding");
-    }  
-    var style = new Style(ad);
-    xd.setAttribute("style", style.initialSize().finalOrigin().translateIn(function () {
-      if (_debug) {
-        console.log("expanded");
-      }  
-      ad.collapsed = true;
-      cb();
+    if (ad.timeoutRef) {
+      clearTimeout(ad.timeoutRef);
+      delete ad.timeoutRef;
+    }
+    xd.setAttribute("style", new Style(ad, xd).zIndex().inOrigin().inSize().animateIn(function () {
+      ad.collapsed = false;
     }).style());
   };
-
-  var clicked = function (ad, xd) {
-    clearTimeout(ad.timeoutRef);
-    delete ad.timeoutRef;
-  }
 
   var showAd = function (ad) {
 
@@ -442,36 +551,85 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
       return;
     }
 
-    var overlayNode = document.getElementById(overlayId);
 
-    if (!overlayNode) {
-      return;
-    }
+    
+    disposeCurrentAd(function () {
 
-    var xd = document.createElement("div");
+      var xd = document.createElement("div");
+      ad.xd = xd;
 
-    // TODO: ad.forced, ad.hidden
+      currentAd = ad;
+      currentXd = xd;
 
-    var onClick = function () {
-      xd.removeEventListener("click", onClick);
-      ad.clicked(ad, xd);
-      handleClick(ad);
-    };
+      if (ad.singledecorator || ad.doubledecorator) {
+        videoContainerElement.insertBefore(xd, videoElement);
+      } else {
+        if (videoContainerElement.lastChild === videoElement) {
+          videoContainerElement.appendChild(xd);
+        } else {
+          videoContainerElement.insertBefore(xd, videoElement.nextSibling);
+        }
+      }
 
-    var img = new Image();
-    img.addEventListener("load", function () {
-      putIntoPosition(ad, xd);
+      var onClick = function (e) {
+        if (e.target === this) {
+          xd.removeEventListener("click", onClick);
+          fireEventListener("ad.click", ad);
+          disposeCurrentAd(function () {
+            fireEventListener("ad.disappear", ad);
+          });
+          if (_customHandler) {
+            _customHandler(ad);
+          } else {
+            handleClick(ad);
+          }
+        }
+      };
+
+      var img = new Image();
+      img.addEventListener("load", function () {
+        putIntoPosition(ad, xd);
+
+        if (ad.expander) {
+          ad.counter = document.createElement("div");
+          
+          var spanContainer = document.createElement("div");
+          spanContainer.setAttribute("style", "position:absolute;left:0;right:0;top:0;bottom:0;margin:auto;width:auto;height:40px;");
+          ad.counter.appendChild(spanContainer);
+
+          var numberSpan = document.createElement("span");
+          numberSpan.setAttribute("style", `font-size:2.6vmax;font-weight:500;font-family:Arial, sans-serif;color:rgba(255, 255, 255, 0.7);width:60px;display:block;margin-top:-2px;`);
+          numberText = document.createTextNode("5");
+          numberSpan.appendChild(numberText);
+          spanContainer.appendChild(numberSpan);
+
+          var secSpan = document.createElement("span");
+          secSpan.setAttribute("style", `font-size:2vmax;font-weight:500;font-family:Arial, sans-serif;color:rgba(255, 255, 255, 0.7);width:60px;display:block;`);
+          secSpan.appendChild(document.createTextNode("sec"));
+          spanContainer.appendChild(secSpan);
+
+          xd.appendChild(ad.counter);
+          ad.counter.setAttribute("style", `position:absolute;bottom:0;${ad.left ? "right:0" : "left:0"};width:60px;height:100%;background-color:rgba(81, 81, 81, 0.7);text-align:center;font-weight:500;font-family:Arial, sans-serif;color:rgba(255, 255, 255, 0.7);margin-top:auto;margin-bottom:auto;`);
+
+          var counter = 4;
+          var intervalRef = setInterval(function () {
+            if (ad !== currentAd || counter < 0) {
+              clearInterval(intervalRef);
+              return;
+            }
+            numberText.nodeValue = counter--;
+          }, 1000);
+        }
+      });
+      xd.addEventListener("click", onClick);
+      img.src = ad.imgUrl;
     });
-    xd.addEventListener("click", onClick);
-    overlayNode.appendChild(xd);
-    img.src = ad.imgUrl;
   };
 
-  this.startAdByTags = function(tags) {
+  this.startAdByTags = function (tags) {
 
     tags = tags.join(",");
-    tags = encodeURIComponent(tags);
-    get("/xd/" + apiKey + "/t/" + encodeURIComponent(tags) + "/c/" + encodeURIComponent(consumerEmail), function(r, code) {
+    get("/xd/" + apiKey + "/t/" + encodeURIComponent(tags) + "/c/" + encodeURIComponent(consumerEmail), function (r, code) {
       if (200 === code) {
         var vast = parseVAST(r);
         showAd(vast);
@@ -481,9 +639,9 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
 
   var lastTimeString;
 
-  var onTimeUpdated = function() {
+  var onTimeUpdated = function () {
 
-    var timeString = timeCodeToString(parseInt(videoTag.currentTime));
+    var timeString = timeCodeToString(parseInt(videoElement.currentTime));
 
     if (lastTimeString === timeString) {
       return;
@@ -496,28 +654,58 @@ var SensAd = function (apiKey, consumerEmail, videoId, overlayId) {
         showAd(vast);
       }
     }
-  }
+  };
 
-  this.startAdByMediaId = function(mediaId, cb) {
+  var disposeCurrentAd = function (cb) {
+    if (!currentAd || !currentXd) {
+      if (cb) {
+        cb();
+      }
+      return 
+    }
+    var node = (currentAd.singledecorator || currentAd.doubledecorator) ? videoElement : currentXd;
+    slideOut(currentAd, node, cb);
+  };
+
+  var disposeTimeoutRefs = function () {
+    for (var timeoutRef of timeoutRefs) {
+      clearTimeout(timeoutRef);
+    }
+    timeoutRefs = [];
+  };
+
+  this.startAdByMediaId = function (mediaId, cb) {
     mediaId = encodeURIComponent(mediaId);
-    get("/xd/" + apiKey + "/m/" + mediaId + "/c/" + encodeURIComponent(consumerEmail), function(r, code) {
+    get("/xd/" + apiKey + "/m/" + mediaId + "/c/" + encodeURIComponent(consumerEmail), function (r, code) {
       if (200 === code) {
         vmap = parseVMAP(r);
-        videoTag.addEventListener("timeupdate", onTimeUpdated, true);
+        videoElement.addEventListener("timeupdate", onTimeUpdated, true);
       }
       cb();
     });
   };
 
-  this.stop = function() {
+  this.stop = function () {
     stopped = true;
-    videoTag.removeEventListener("timeupdate", onTimeUpdated, true);
-    for (var timeoutRef of timeoutRefs) {
-      clearTimeout(timeoutRef);
+    videoElement.removeEventListener("timeupdate", onTimeUpdated, true);
+    disposeTimeoutRefs();
+    eventListeners = [];
+  };
+
+  var eventListeners = {};
+
+  var fireEventListener = function (event, ad) {
+    if (eventListeners[event]) {
+      for (var cb of eventListeners[event]) {
+        cb(ad);
+      }
     }
-    timeoutRefs = [];
-    if (_debug) {
-      console.log("stopped");
-    }  
+  };
+
+  this.addEventListener = function (event, cb) {
+    if (!eventListeners[event]) {
+      eventListeners[event] = [];
+    }
+    eventListeners[event].push(cb);
   };
 };
